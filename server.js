@@ -102,6 +102,59 @@ proxy.on('proxyRes', (proxyRes, req, res) => {
         return `wss://${host}/x/${domain}`;
       });
 
+      // Для HTML дополнительно внедряем перехватчик fetch/WebSocket/XHR.
+      // Это нужно, потому что часть адресов Telegram Web собирает
+      // на лету (например "dc" + номер + ".web.telegram.org"), а не
+      // пишет готовой строкой — такие случаи текстовая замена выше
+      // не ловит. Перехватчик подменяет вызовы уже в момент их
+      // выполнения, независимо от того, как был собран URL.
+      if (/text\/html/i.test(contentType)) {
+        const injector = `<script>(function(){
+  var HOST = location.host;
+  function rewrite(url){
+    try {
+      var u = new URL(url, location.href);
+      if (/\\.telegram\\.org$/i.test(u.hostname)) {
+        var proto = (u.protocol === 'wss:' || u.protocol === 'ws:') ? 'wss:' : 'https:';
+        return proto + '//' + HOST + '/x/' + u.hostname + u.pathname + u.search;
+      }
+    } catch(e) {}
+    return url;
+  }
+  var origFetch = window.fetch;
+  if (origFetch) {
+    window.fetch = function(input, init){
+      if (typeof input === 'string') input = rewrite(input);
+      else if (input && input.url) input = new Request(rewrite(input.url), input);
+      return origFetch.call(this, input, init);
+    };
+  }
+  var OrigWS = window.WebSocket;
+  if (OrigWS) {
+    var PatchedWS = function(url, protocols){
+      return protocols ? new OrigWS(rewrite(url), protocols) : new OrigWS(rewrite(url));
+    };
+    PatchedWS.prototype = OrigWS.prototype;
+    PatchedWS.CONNECTING = OrigWS.CONNECTING;
+    PatchedWS.OPEN = OrigWS.OPEN;
+    PatchedWS.CLOSING = OrigWS.CLOSING;
+    PatchedWS.CLOSED = OrigWS.CLOSED;
+    window.WebSocket = PatchedWS;
+  }
+  var origOpen = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function(method, url){
+    arguments[1] = rewrite(url);
+    return origOpen.apply(this, arguments);
+  };
+})();</script>`;
+
+        if (/<head[^>]*>/i.test(text)) {
+          text = text.replace(/<head[^>]*>/i, (m) => m + injector);
+        } else {
+          text = injector + text;
+        }
+      }
+
       const out = Buffer.from(text, 'utf8');
       const headers = { ...proxyRes.headers };
       delete headers['content-encoding'];
