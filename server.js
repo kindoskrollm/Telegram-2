@@ -75,12 +75,19 @@ proxy.on('proxyRes', (proxyRes, req, res) => {
   }
 
   const chunks = [];
+  let aborted = false;
+  res.on('close', () => { aborted = true; });
   proxyRes.on('data', (c) => chunks.push(c));
   proxyRes.on('end', () => {
+    if (aborted) return;
     const raw = Buffer.concat(chunks);
     const encoding = proxyRes.headers['content-encoding'];
 
     const rewriteAndSend = (bodyBuf) => {
+      // Клиент мог уже отключиться, или ответ уже был отправлен раньше —
+      // тогда просто ничего не делаем, вместо падения с ERR_HTTP_HEADERS_SENT.
+      if (res.headersSent || res.writableEnded) return;
+
       let text = bodyBuf.toString('utf8');
 
       // https://xxx.telegram.org  ->  /x/xxx.telegram.org
@@ -99,8 +106,13 @@ proxy.on('proxyRes', (proxyRes, req, res) => {
       const headers = { ...proxyRes.headers };
       delete headers['content-encoding'];
       headers['content-length'] = Buffer.byteLength(out);
-      res.writeHead(proxyRes.statusCode, headers);
-      res.end(out);
+
+      try {
+        res.writeHead(proxyRes.statusCode, headers);
+        res.end(out);
+      } catch (err) {
+        // Соединение оборвалось между проверкой выше и записью — просто игнорируем.
+      }
     };
 
     if (encoding === 'gzip') {
